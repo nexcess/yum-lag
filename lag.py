@@ -32,6 +32,7 @@ import time
 import functools
 
 from yum.plugins import PluginYumExit, TYPE_CORE
+from yum import config as yum_config
 
 LOG_INFO = 2    # this level is regular visibility
 LOG_VERBOSE = 3 # this is only visible with -v
@@ -52,6 +53,7 @@ def plugin_hook(func):
 
 class YumLagPlugin(object):
     DEFAULT_EXCLUDE_NEWER_THAN  = 7
+    MAX_EXCLUDE_NEWER_THAN      = 365
     DEFAULT_CHECK_MODE          = 'file'
 
     ERROR_INVALID_EXCLUDE_PERIOD    = 'exclude_newer_than must be >= 0 (value: %d)'
@@ -64,11 +66,7 @@ class YumLagPlugin(object):
         'build': lambda pkg: int(pkg.returnSimple('time_build')),
     }
 
-    _conf = {
-        'exclude_newer_than':   {},
-        'check_mode':           DEFAULT_CHECK_MODE,
-        'is_update':            False,
-    }
+    _is_update = False
     _conduit = None
 
     def __init__(self):
@@ -77,37 +75,31 @@ class YumLagPlugin(object):
         anything useful
         """
         self.TIMESTAMP_CHECK_FUNCS['newest'] = \
-            lambda pkg: max([
+            lambda pkg: max(
                 self.TIMESTAMP_CHECK_FUNCS['file'](pkg),
-                self.TIMESTAMP_CHECK_FUNCS['build'](pkg)])
+                self.TIMESTAMP_CHECK_FUNCS['build'](pkg))
         self.TIMESTAMP_CHECK_FUNCS['oldest'] = \
-            lambda pkg: min([
+            lambda pkg: min(
                 self.TIMESTAMP_CHECK_FUNCS['file'](pkg),
-                self.TIMESTAMP_CHECK_FUNCS['build'](pkg)])
+                self.TIMESTAMP_CHECK_FUNCS['build'](pkg))
 
-    def _validate_config(self):
-        """Validate the exclude_newer_than and check_mode options
-        """
-        for repo_id in self._conf['exclude_newer_than']:
-            if self._conf['exclude_newer_than'][repo_id] < 0:
-                raise PluginYumExit(self.ERROR_INVALID_EXCLUDE_PERIOD %
-                    self._conf['exclude_newer_than'][repo_id])
-        if self._conf['check_mode'] not in self.TIMESTAMP_CHECK_FUNCS:
-            raise PluginYumExit(self.ERROR_INVALID_CHECK_MODE %
-                self._conf['check_mode'])
-
-    def _get_ts_check_func(self, repo_id):
+    def _get_ts_check_func(self, repo):
         """Build the timestamp checking function based on the exclude_newer_than
         option for the repo and global check_mode. The constructed function
         will return True if the package is too new and False otherwise
         """
-        get_ts = self.TIMESTAMP_CHECK_FUNCS[self._conf['check_mode']]
-        ts_cutoff = int(time.time()) - \
-            (self._conf['exclude_newer_than'][repo_id] * 86400)
+        self._conduit.info(LOG_VERBOSE,
+            'Building ts_check func with ENT=%d and check_mode=%s for repo: %s' % \
+                (repo.exclude_newer_than, repo.check_mode, repo.id))
+
+        get_ts = self.TIMESTAMP_CHECK_FUNCS[repo.check_mode]
+        ts_cutoff = int(time.time()) - (repo.exclude_newer_than * 86400)
 
         check_func = lambda pkg: get_ts(pkg) > ts_cutoff
-
         return check_func
+
+    def constrain_ENT(self, value):
+        return max(0, min(value, self.MAX_EXCLUDE_NEWER_THAN))
 
     @staticmethod
     def get():
@@ -119,29 +111,29 @@ class YumLagPlugin(object):
             _YLP_SINGLETON = YumLagPlugin()
         return _YLP_SINGLETON
 
-    @plugin_hook
-    def init_hook(self, conduit):
-        """Read and load the plugin conf
+    @property
+    def repos(self):
+        """Get the list of enabled repo objects
         """
-        conduit.registerPackageName(__title__)
-
-        self._conf['check_mode'] = conduit.confString('main', 'check_mode',
-            default=self.DEFAULT_CHECK_MODE)
-        ENT = conduit.confInt('main', 'exclude_newer_than',
-            default=self.DEFAULT_EXCLUDE_NEWER_THAN)
-        for repo in conduit.getRepos().listEnabled():
-            try:
-                repo_ENT = repo.exclude_newer_than
-            except AttributeError:
-                repo_ENT = ENT
-            self._conf['exclude_newer_than'][repo.id] = repo_ENT
-            self._conduit.info(LOG_VERBOSE,
-                'Set repo (%s) to exclude_newer_than=%d' % (repo.id, repo_ENT))
+        try:
+            return self._conduit.getRepos().listEnabled()
+        except AttributeError:
+            return []
 
     @plugin_hook
     def config_hook(self, conduit):
         """Add any CLI options we need
         """
+        yum_config.RepoConf.check_mode = yum_config.SelectionOption(
+            default=conduit.confString('main', 'check_mode',
+                self.DEFAULT_CHECK_MODE),
+            allowed=self.TIMESTAMP_CHECK_FUNCS.keys())
+
+        yum_config.RepoConf.exclude_newer_than = yum_config.IntOption(
+            default=self.constrain_ENT(conduit.confInt('main', 'exclude_newer_than',
+                self.DEFAULT_EXCLUDE_NEWER_THAN)),
+            range_min=0, range_max=self.MAX_EXCLUDE_NEWER_THAN)
+
         parser = conduit.getOptParser()
         parser.add_option('', '--exclude-newer-than',
             action='store', default=None, type='int', metavar='DAYS',
@@ -154,14 +146,14 @@ class YumLagPlugin(object):
         """
         opts, commands = conduit.getCmdLine()
         if opts.exclude_newer_than is not None:
-            for repo_id in self._conf['exclude_newer_than']:
-                self._conf['exclude_newer_than'][repo_id] = opts.exclude_newer_than
-            self._conduit.info(LOG_VERBOSE,
-                'Set all repos to exclude_newer_than=%d' % opts.exclude_newer_than)
-        self._validate_config()
+            ENT = self.constrain_ENT(opts.exclude_newer_than)
+            for repo in self.repos:
+                repo.exclude_newer_than = ENT
+                conduit.info(LOG_VERBOSE,
+                    'Set all repos to exclude_newer_than=%d' % opts.exclude_newer_than)
 
         if 'update' in commands or 'upgrade' in commands:
-            self._conf['is_update'] = True
+            self._is_update = True
 
     @plugin_hook
     def exclude_hook(self, conduit):
@@ -169,12 +161,10 @@ class YumLagPlugin(object):
         proposed update is too new and remove it if so. Nothing is done if
         not using the 'update' or 'upgrade' commands
         """
-        if self._conf['is_update']:
-            for repo in conduit.getRepos().listEnabled():
-                # check this just to be extra safe
-                if repo.id in self._conf['exclude_newer_than']:
-                    pkg_is_too_new = self._get_ts_check_func(repo.id)
-                    # for each package in the repo
+        if self._is_update:
+            for repo in self.repos:
+                if repo.exclude_newer_than > 0:
+                    pkg_is_too_new = self._get_ts_check_func(repo)
                     for pkg in conduit.getPackages(repo):
                         if pkg_is_too_new(pkg):
                             conduit.delPackage(pkg)
