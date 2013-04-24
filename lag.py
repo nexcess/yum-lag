@@ -28,21 +28,22 @@ __license__     = 'GPLv2'
 __copyright__   = 'Copyright (C) 2013  Nexcess.net L.L.C.'
 
 
-import logging
 import time
 import functools
 
 from yum.plugins import PluginYumExit, TYPE_CORE
 
-LOG_INFO = 2
-LOG_VERBOSE = 3
+LOG_INFO = 2    # this level is regular visibility
+LOG_VERBOSE = 3 # this is only visible with -v
 
 requires_api_version = '2.3'
 plugin_type = (TYPE_CORE,)
-
+# reference to the YumLagPlugin singleton
 _YLP_SINGLETON = None
 
 def plugin_hook(func):
+    """Update the plugin's stored conduit
+    """
     @functools.wraps(func)
     def inner_func(self, conduit):
         self._conduit = conduit
@@ -57,7 +58,9 @@ class YumLagPlugin(object):
     ERROR_INVALID_CHECK_MODE        = 'Invalid check_mode: %s'
 
     TIMESTAMP_CHECK_FUNCS           = {
+        # get the RPM file timestamp (mtime on the repo host)
         'file': lambda pkg: int(pkg.returnSimple('time_file')),
+        # get the RPM BuildDate tag
         'build': lambda pkg: int(pkg.returnSimple('time_build')),
     }
 
@@ -68,6 +71,10 @@ class YumLagPlugin(object):
     _conduit = None
 
     def __init__(self):
+        """We can't do much here besides add the other check modes since this
+        object is created before we have a conduit which we need to do
+        anything useful
+        """
         self.TIMESTAMP_CHECK_FUNCS['newest'] = \
             lambda pkg: max([
                 self.TIMESTAMP_CHECK_FUNCS['file'](pkg),
@@ -78,15 +85,21 @@ class YumLagPlugin(object):
                 self.TIMESTAMP_CHECK_FUNCS['build'](pkg)])
 
     def _validate_config(self):
+        """Validate the exclude_newer_than and check_mode options
+        """
         for repo_id in self._conf['exclude_newer_than']:
             if self._conf['exclude_newer_than'][repo_id] < 0:
                 raise PluginYumExit(self.ERROR_INVALID_EXCLUDE_PERIOD %
                     self._conf['exclude_newer_than'][repo_id])
-        if self._conf['check_mode'] not in ['file', 'build', 'newest', 'oldest']:
+        if self._conf['check_mode'] not in self.TIMESTAMP_CHECK_FUNCS:
             raise PluginYumExit(self.ERROR_INVALID_CHECK_MODE %
                 self._conf['check_mode'])
 
     def _get_ts_check_func(self, repo_id):
+        """Build the timestamp checking function based on the exclude_newer_than
+        option for the repo and global check_mode. The constructed function
+        will return True if the package is too new and False otherwise
+        """
         get_ts = self.TIMESTAMP_CHECK_FUNCS[self._conf['check_mode']]
         ts_cutoff = int(time.time()) - \
             (self._conf['exclude_newer_than'][repo_id] * 86400)
@@ -97,6 +110,9 @@ class YumLagPlugin(object):
 
     @staticmethod
     def get():
+        """Singleton access method, because everything should have OO patterns
+        shoe-horned in.
+        """
         global _YLP_SINGLETON
         if _YLP_SINGLETON is None:
             _YLP_SINGLETON = YumLagPlugin()
@@ -104,8 +120,12 @@ class YumLagPlugin(object):
 
     @plugin_hook
     def init_hook(self, conduit):
+        """Read and load the plugin conf
+        """
         conduit.registerPackageName(__title__)
 
+        self._conf['check_mode'] = conduit.confString('main', 'check_mode',
+            default=self.DEFAULT_CHECK_MODE)
         ENT = conduit.confInt('main', 'exclude_newer_than',
             default=self.DEFAULT_EXCLUDE_NEWER_THAN)
         for repo in conduit.getRepos().listEnabled():
@@ -119,6 +139,8 @@ class YumLagPlugin(object):
 
     @plugin_hook
     def config_hook(self, conduit):
+        """Add any CLI options we need
+        """
         parser = conduit.getOptParser()
         parser.add_option('', '--exclude-newer-than',
             action='store', default=None, type='int', metavar='DAYS',
@@ -126,6 +148,9 @@ class YumLagPlugin(object):
 
     @plugin_hook
     def prereposetup_hook(self, conduit):
+        """Apply the CLI options (if given) to the config and validate the
+        resulting config
+        """
         opts, commands = conduit.getCmdLine()
         if opts.exclude_newer_than is not None:
             for repo_id in self._conf['exclude_newer_than']:
@@ -136,9 +161,14 @@ class YumLagPlugin(object):
 
     @plugin_hook
     def exclude_hook(self, conduit):
+        """Meat of the plugin. Walk through each package by repo, check if the
+        proposed update is too new and remove it if so
+        """
         for repo in conduit.getRepos().listEnabled():
+            # check this just to be extra safe
             if repo.id in self._conf['exclude_newer_than']:
                 pkg_is_too_new = self._get_ts_check_func(repo.id)
+                # for each package in the repo
                 for pkg in conduit.getPackages(repo):
                     if pkg_is_too_new(pkg):
                         conduit.delPackage(pkg)
@@ -148,11 +178,6 @@ class YumLagPlugin(object):
 
 # Setup the real hooks that YUM looks for
 YLP = YumLagPlugin.get()
-for hook in (h for h in dir(YLP) if h.endswith('_hook') and not h.startswith('_')):
+for hook in (h for h in dir(YLP) \
+        if h.endswith('_hook') and not h.startswith('_')):
     globals()[hook] = getattr(YLP, hook)
-
-def main():
-    pass
-
-if __name__ == '__main__':
-    main()
