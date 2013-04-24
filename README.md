@@ -23,6 +23,14 @@ applies to the *update* and *upgrade* YUM commands and is bypassed for *install*
 and etc. The plugin also adds a `--exclude-newer-than` option to override both
 the global and per-repo *exclude_newer_than* options.
 
+## Technical Notes
+
+The plugin looks at the `time_file` (RPM file mtime) and `time_build` (RPM
+BuildDate) to determine the update's age (from the primary repodata). These do
+not necessarily (and probably won't) correspond to when they first appear
+available to update to. Unforunately there's no easy way to track that, it would
+be much more complicated if possible at all so this will have to work for now.
+
 ## Examples
 
 Regular update run:
