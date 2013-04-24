@@ -67,6 +67,7 @@ class YumLagPlugin(object):
     _conf = {
         'exclude_newer_than':   {},
         'check_mode':           DEFAULT_CHECK_MODE,
+        'is_update':            False,
     }
     _conduit = None
 
@@ -159,22 +160,27 @@ class YumLagPlugin(object):
                 'Set all repos to exclude_newer_than=%d' % opts.exclude_newer_than)
         self._validate_config()
 
+        if 'update' in commands or 'upgrade' in commands:
+            self._conf['is_update'] = True
+
     @plugin_hook
     def exclude_hook(self, conduit):
         """Meat of the plugin. Walk through each package by repo, check if the
-        proposed update is too new and remove it if so
+        proposed update is too new and remove it if so. Nothing is done if
+        not using the 'update' or 'upgrade' commands
         """
-        for repo in conduit.getRepos().listEnabled():
-            # check this just to be extra safe
-            if repo.id in self._conf['exclude_newer_than']:
-                pkg_is_too_new = self._get_ts_check_func(repo.id)
-                # for each package in the repo
-                for pkg in conduit.getPackages(repo):
-                    if pkg_is_too_new(pkg):
-                        conduit.delPackage(pkg)
-                        conduit.info(LOG_VERBOSE,
-                            ' --> %s from %s excluded (too new)' % \
-                                (pkg, repo.id))
+        if self._conf['is_update']:
+            for repo in conduit.getRepos().listEnabled():
+                # check this just to be extra safe
+                if repo.id in self._conf['exclude_newer_than']:
+                    pkg_is_too_new = self._get_ts_check_func(repo.id)
+                    # for each package in the repo
+                    for pkg in conduit.getPackages(repo):
+                        if pkg_is_too_new(pkg):
+                            conduit.delPackage(pkg)
+                            conduit.info(LOG_VERBOSE,
+                                ' --> %s from %s excluded (too new)' % \
+                                    (pkg, repo.id))
 
 # Setup the real hooks that YUM looks for
 YLP = YumLagPlugin.get()
