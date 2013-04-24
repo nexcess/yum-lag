@@ -29,7 +29,6 @@ __copyright__   = 'Copyright (C) 2013  Nexcess.net L.L.C.'
 
 
 import time
-import functools
 
 from yum.plugins import PluginYumExit, TYPE_CORE
 from yum import config as yum_config
@@ -42,14 +41,6 @@ plugin_type = (TYPE_CORE,)
 # reference to the YumLagPlugin singleton
 _YLP_SINGLETON = None
 
-def plugin_hook(func):
-    """Update the plugin's stored conduit
-    """
-    @functools.wraps(func)
-    def inner_func(self, conduit):
-        self._conduit = conduit
-        return func(self, conduit)
-    return inner_func
 
 class YumLagPlugin(object):
     DEFAULT_EXCLUDE_NEWER_THAN  = 7
@@ -67,7 +58,6 @@ class YumLagPlugin(object):
     }
 
     _is_update = False
-    _conduit = None
 
     def __init__(self):
         """We can't do much here besides add the other check modes since this
@@ -83,12 +73,12 @@ class YumLagPlugin(object):
                 self.TIMESTAMP_CHECK_FUNCS['file'](pkg),
                 self.TIMESTAMP_CHECK_FUNCS['build'](pkg))
 
-    def _get_ts_check_func(self, repo):
+    def _get_ts_check_func(self, conduit, repo):
         """Build the timestamp checking function based on the exclude_newer_than
         option for the repo and global check_mode. The constructed function
         will return True if the package is too new and False otherwise
         """
-        self._conduit.info(LOG_VERBOSE,
+        conduit.info(LOG_VERBOSE,
             'Building ts_check func with ENT=%d and check_mode=%s for repo: %s' % \
                 (repo.exclude_newer_than, repo.check_mode, repo.id))
 
@@ -111,16 +101,6 @@ class YumLagPlugin(object):
             _YLP_SINGLETON = YumLagPlugin()
         return _YLP_SINGLETON
 
-    @property
-    def repos(self):
-        """Get the list of enabled repo objects
-        """
-        try:
-            return self._conduit.getRepos().listEnabled()
-        except AttributeError:
-            return []
-
-    @plugin_hook
     def config_hook(self, conduit):
         """Add any CLI options we need
         """
@@ -139,7 +119,6 @@ class YumLagPlugin(object):
             action='store', default=None, type='int', metavar='DAYS',
             help='Exclude updates newer than DAYS, overrides global and per-repo config value')
 
-    @plugin_hook
     def prereposetup_hook(self, conduit):
         """Apply the CLI options (if given) to the config and validate the
         resulting config
@@ -147,24 +126,23 @@ class YumLagPlugin(object):
         opts, commands = conduit.getCmdLine()
         if opts.exclude_newer_than is not None:
             ENT = self.constrain_ENT(opts.exclude_newer_than)
-            for repo in self.repos:
+            for repo in conduit.getRepos().listEnabled():
                 repo.exclude_newer_than = ENT
                 conduit.info(LOG_VERBOSE,
-                    'Set all repos to exclude_newer_than=%d' % opts.exclude_newer_than)
+                    'Set repos to exclude_newer_than=%d' % opts.exclude_newer_than)
 
         if 'update' in commands or 'upgrade' in commands:
             self._is_update = True
 
-    @plugin_hook
     def exclude_hook(self, conduit):
         """Meat of the plugin. Walk through each package by repo, check if the
         proposed update is too new and remove it if so. Nothing is done if
         not using the 'update' or 'upgrade' commands
         """
         if self._is_update:
-            for repo in self.repos:
+            for repo in conduit.getRepos().listEnabled():
                 if repo.exclude_newer_than > 0:
-                    pkg_is_too_new = self._get_ts_check_func(repo)
+                    pkg_is_too_new = self._get_ts_check_func(conduit, repo)
                     for pkg in conduit.getPackages(repo):
                         if pkg_is_too_new(pkg):
                             conduit.delPackage(pkg)
