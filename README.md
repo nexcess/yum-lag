@@ -24,6 +24,7 @@ the global and per-repo *exclude_newer_than* options.
 
 ## Examples
 
+Regular update run:
 ~~~~
 $ sudo yum update
 Loaded plugins: fastestmirror, lag
@@ -77,6 +78,7 @@ Total download size: 6.1 M
 Is this ok [y/N]: n
 ~~~~
 
+Only update with packages older than 30 days
 ~~~~
 $ sudo yum update --exclude-newer-than 30
 Loaded plugins: fastestmirror, lag
