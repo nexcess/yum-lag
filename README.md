@@ -12,8 +12,9 @@ in `/etc/yum/pluginconf.d/`.
 ## Configuration
 
 Configuration options are explained in `lag.conf`. You can also use the
-*exclude_newer_than* option in the repo config sections to override the global
-value.
+*exclude_newer_than* and *check_mode* options in the repo config sections to
+override the global values. The *exclude_newer_than* option can be set to `0`
+to prevent the exclusion check altogether (for an individual repo or globally).
 
 ## Usage
 
